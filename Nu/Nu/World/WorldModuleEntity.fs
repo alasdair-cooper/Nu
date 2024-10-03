@@ -614,17 +614,12 @@ module WorldModuleEntity =
             let mounterState = World.getEntityState mounter world
             if  not mounterState.Physical || // OPTIMIZATION: skip call to getEntityAllowedToMount when non-physical.
                 World.getEntityAllowedToMount mounter world then
-                let affineMatrixWorld = World.getEntityAffineMatrix mount world
-                let affineMatrixLocal = World.getEntityAffineMatrixLocal mounter world
-                let affineMatrix = affineMatrixLocal * affineMatrixWorld
-                let mutable (scale, rotation, position) = (v3One, quatIdentity, v3Zero)
-                if Matrix4x4.Decompose (affineMatrix, &scale, &rotation, &position) then
-                    let mutable transform = mounterState.Transform
-                    transform.Position <- position
-                    transform.Rotation <- rotation
-                    transform.Scale <- scale
-                    World.setEntityTransformByRef (&transform, mounterState, mounter, world) |> snd'
-                else world
+                let mountState = World.getEntityState mount world
+                let mutable transform = mounterState.Transform
+                transform.Position <- Vector3.Transform (mounterState.PositionLocal, mountState.AffineMatrix)
+                transform.Rotation <- mountState.Rotation * mounterState.RotationLocal
+                transform.Scale <- mounterState.ScaleLocal * mountState.Scale
+                World.setEntityTransformByRef (&transform, mounterState, mounter, world) |> snd'
             else world
 
         static member internal propagateEntityProperties3 mountOpt entity world =
@@ -693,6 +688,15 @@ module WorldModuleEntity =
             let entityState = World.getEntityState entity world
             let previous = entityState.MountOpt
             if value <> previous then
+
+                // validate mount value
+                match value with
+                | Some mount ->
+                    let mountAddress = Relation.resolve entity.EntityAddress mount
+                    let mountToEntity = Relation.relate entity.EntityAddress mountAddress
+                    if Array.notExists (function Parent | Name "???" | Name "??" | Name "?" -> true | _ -> false) mountToEntity.Links then
+                        failwith "Cannot mount an entity circularly."
+                | None -> ()
 
                 // update property
                 let struct (entityState, world) =
@@ -1069,7 +1073,7 @@ module WorldModuleEntity =
                                     entityState.AnglesLocal <- anglesLocal
                                     struct (entityState, world)
                                 else
-                                    let entityState = { entityState with RotationLocal = value }
+                                    let entityState = { entityState with RotationLocal = value; AnglesLocal = anglesLocal }
                                     struct (entityState, World.setEntityState entityState entity world)
                             let publishChangeEvents = entityState.PublishChangeEvents
                             let world = World.publishEntityChange (nameof entityState.RotationLocal) previous value publishChangeEvents entity world
@@ -2260,6 +2264,9 @@ module WorldModuleEntity =
                     else entityState
                 | None -> entityState
 
+            // populate local angles value from local rotation
+            entityState.AnglesLocal <- entityState.RotationLocal.RollPitchYaw
+
             // make entity address
             let entityAddress = group.GroupAddress <-- rtoa<Entity> entityState.Surnames
 
@@ -2491,6 +2498,9 @@ module WorldModuleEntity =
 
             // read the entity state's values
             let entityState = Reflection.readPropertiesToTarget id entityDescriptor.EntityProperties entityState
+
+            // populate local angles value from local rotation
+            entityState.AnglesLocal <- entityState.RotationLocal.RollPitchYaw
 
             // configure the name and surnames
             let (name, surnames) =

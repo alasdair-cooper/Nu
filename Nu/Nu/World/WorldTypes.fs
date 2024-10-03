@@ -36,7 +36,8 @@ module internal WorldTypes =
     let mutable internal getSelectedScreenTransitioning : obj -> bool = Unchecked.defaultof<_>
     let mutable internal handleSubscribeAndUnsubscribeEvent : bool -> obj Address -> Simulant -> obj -> obj = Unchecked.defaultof<_>
 
-    // Entity F# reach-arounds.
+    // Simulant F# reach-arounds.
+    let mutable internal createDefaultGroup : obj -> obj -> obj * obj = Unchecked.defaultof<_>
     let mutable internal getEntityIs2d : obj -> obj -> bool = Unchecked.defaultof<_>
 
 /// The type of a subscription callback.
@@ -121,7 +122,6 @@ and EditContext =
       FocusProperty : unit -> unit
       UnfocusProperty : unit -> unit
       SearchAssetViewer : unit -> unit
-      PropertyValueStrPreviousRef : string ref
       DragDropPayloadOpt : string option
       SnapDrag : single
       SelectedScreen : Screen
@@ -535,6 +535,12 @@ and ScreenDispatcher () =
     /// Attempt to untruncate a screen model.
     abstract TryUntruncateModel<'a> : 'a * Screen * World -> 'a option
     default this.TryUntruncateModel (_, _, _) = None
+
+    /// Create the default group in the context of this screen dispatcher.
+    abstract CreateDefaultGroup : Screen * World -> Group * World
+    default this.CreateDefaultGroup (screen, world) =
+        let (groupObj, worldObj) = WorldTypes.createDefaultGroup screen world
+        (groupObj :?> Group, worldObj :?> World)
 
 /// The default dispatcher for groups.
 and GroupDispatcher () =
@@ -1771,10 +1777,16 @@ and GameDescriptor =
           GameProperties = Map.empty
           ScreenDescriptors = [] }
 
-/// Provides bookkeeping information with the ImNui API.
+/// Provides simulant bookkeeping information with the ImNui API.
 and [<NoEquality; NoComparison>] internal SimulantImNui =
-    { mutable Utilized : bool
+    { mutable SimulantUtilized : bool
       Result : obj }
+
+/// Provides subscription bookkeeping information with the ImNui API.
+and [<NoEquality; NoComparison>] internal SubscriptionImNui =
+    { mutable SubscriptionUtilized : bool
+      Results : obj
+      SubscriptionId : uint64 }
 
 /// Describes an argument used with the ImNui API.
 and [<Struct>] ArgImNui<'s when 's :> Simulant> =
@@ -1805,6 +1817,7 @@ and [<ReferenceEquality>] internal WorldExtension =
     { mutable ContextImNui : Address
       mutable RecentImNui : Address
       mutable SimulantImNuis : OMap<Simulant, SimulantImNui>
+      mutable SubscriptionImNuis : OMap<string * Address * Address, SubscriptionImNui>
       DestructionListRev : Simulant list
       Dispatchers : Dispatchers
       Plugin : NuPlugin
@@ -1963,6 +1976,9 @@ and [<ReferenceEquality>] World =
 
     member internal this.SimulantImNuis =
         this.WorldExtension.SimulantImNuis
+
+    member internal this.SubscriptionImNuis =
+        this.WorldExtension.SubscriptionImNuis
 
 #if DEBUG
     member internal this.Choose () =

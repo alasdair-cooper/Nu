@@ -75,17 +75,32 @@ module WorldModule2 =
             let world =
                 match World.getSelectedScreenOpt world with
                 | Some selectedScreen ->
-                    let eventTrace = EventTrace.debug "World" "selectScreen" "Deselecting" EventTrace.empty
-                    World.publishPlus () selectedScreen.DeselectingEvent eventTrace selectedScreen false false world
+                    let deselecting =
+                        match transitionStateAndScreenOpt with
+                        | Some (_, screen) when selectedScreen = screen -> false
+                        | Some _ | None -> true
+                    if deselecting then
+                        let eventTrace = EventTrace.debug "World" "selectScreen" "Deselecting" EventTrace.empty
+                        World.publishPlus () selectedScreen.DeselectingEvent eventTrace selectedScreen false false world
+                    else world
                 | None -> world
             match transitionStateAndScreenOpt with
             | Some (transitionState, screen) ->
-                let world = World.setScreenTransitionStatePlus transitionState screen world
-                let world = World.setSelectedScreen screen world
-                let eventTrace = EventTrace.debug "World" "selectScreen" "Select" EventTrace.empty
-                World.publishPlus () screen.SelectEvent eventTrace screen false false world
-            | None ->
-                World.setSelectedScreenOpt None world
+                let world =
+                    match World.getSelectedScreenOpt world with
+                    | Some selectedScreen ->
+                        let select =
+                            match transitionStateAndScreenOpt with
+                            | Some (_, screen) when selectedScreen = screen -> false
+                            | Some _ | None -> true
+                        if select then
+                            let world = World.setSelectedScreen screen world
+                            let eventTrace = EventTrace.debug "World" "selectScreen" "Select" EventTrace.empty
+                            World.publishPlus () screen.SelectEvent eventTrace screen false false world
+                        else world
+                    | None -> world
+                World.setScreenTransitionStatePlus transitionState screen world
+            | None -> World.setSelectedScreenOpt None world
 
         /// Select the given screen without transitioning, even if another transition is taking place.
         static member selectScreen transitionState screen world =
@@ -598,6 +613,14 @@ module WorldModule2 =
 
             // propagate entity
             let targets = entity.GetPropagationTargets world
+            let targetsValid =
+                Seq.filter (fun (target : Entity) ->
+                    let targetToEntity = Relation.relate target.EntityAddress entity.EntityAddress
+                    let linkLast = Array.tryLast targetToEntity.Links
+                    let valid = linkLast <> Some Parent && linkLast <> Some Current
+                    if not valid then Log.warn ("Invalid propagation target '" + scstring target + "' from source '" + scstring entity + "'.")
+                    valid)
+                    targets
             let currentDescriptor = World.writeEntity true EntityDescriptor.empty entity world
             let previousDescriptor = Option.defaultValue EntityDescriptor.empty (entity.GetPropagatedDescriptorOpt world)
             let world =
@@ -612,13 +635,22 @@ module WorldModule2 =
                         let world = target.SetOrder order world
                         world
                     else world)
-                    world targets
+                    world targetsValid
             let currentDescriptor = { currentDescriptor with EntityProperties = Map.remove (nameof Entity.PropagatedDescriptorOpt) currentDescriptor.EntityProperties }
             let world = entity.SetPropagatedDescriptorOpt (Some currentDescriptor) world
 
             // propagate sourced ancestor entities
             seq {
-                for target in entity.GetPropagationTargets world do
+                let targets = entity.GetPropagationTargets world
+                let targetsValid =
+                    Seq.filter (fun (target : Entity) ->
+                        let targetToEntity = Relation.relate target.EntityAddress entity.EntityAddress
+                        let linkLast = Array.tryLast targetToEntity.Links
+                        let valid = linkLast <> Some Parent && linkLast <> Some Current
+                        if not valid then Log.warn ("Invalid propagation target '" + scstring target + "' from source '" + scstring entity + "'.")
+                        valid)
+                        targets
+                for target in targetsValid do
                     if target.GetExists world then
                         for ancestor in World.getEntityAncestors target world do
                             if ancestor.GetExists world && ancestor.HasPropagationTargets world then
@@ -757,24 +789,28 @@ module WorldModule2 =
                     Octree.removeElement entityState.Presence entityState.Bounds element octree
             world
 
-        static member internal registerScreenPhysics screen world =
+        static member internal registerScreenPhysics only3dHack screen world =
             let entities =
                 World.getGroups screen world |>
                 Seq.map (flip World.getEntities world) |>
                 Seq.concat |>
                 SList.ofSeq
             SList.fold (fun world (entity : Entity) ->
-                World.registerEntityPhysics entity world)
+                if not only3dHack || entity.GetIs3d world
+                then World.registerEntityPhysics entity world
+                else world)
                 world entities
 
-        static member internal unregisterScreenPhysics screen world =
+        static member internal unregisterScreenPhysics only3dHack screen world =
             let entities =
                 World.getGroups screen world |>
                 Seq.map (flip World.getEntities world) |>
                 Seq.concat |>
                 SList.ofSeq
             SList.fold (fun world (entity : Entity) ->
-                World.unregisterEntityPhysics entity world)
+                if not only3dHack || entity.GetIs3d world
+                then World.unregisterEntityPhysics entity world
+                else world)
                 world entities
 
         /// Try to reload the overlayer currently in use by the world.
@@ -1285,18 +1321,25 @@ module WorldModule2 =
 
         static member internal sweepImNui (world : World) =
             if world.Advancing then
-                OMap.fold (fun world simulant simulantImNui ->
-                    if not simulantImNui.Utilized then
-                        let world = World.destroy simulant world
-                        World.setSimulantImNuis (OMap.remove simulant world.SimulantImNuis) world
-                    else
-                        if world.Imperative then
-                            simulantImNui.Utilized <- false
-                            world
+                let world =
+                    OMap.fold (fun world simulant simulantImNui ->
+                        if not simulantImNui.SimulantUtilized then
+                            let world = World.destroy simulant world
+                            World.setSimulantImNuis (OMap.remove simulant world.SimulantImNuis) world
                         else
-                            let world = World.setSimulantImNuis (OMap.add simulant { simulantImNui with Utilized = false } world.SimulantImNuis) world
-                            world)
-                    world world.SimulantImNuis
+                            if world.Imperative then simulantImNui.SimulantUtilized <- false; world
+                            else World.setSimulantImNuis (OMap.add simulant { simulantImNui with SimulantUtilized = false } world.SimulantImNuis) world)
+                        world world.SimulantImNuis
+                let world =
+                    OMap.fold (fun world subscriptionKey subscriptionImNui ->
+                        if not subscriptionImNui.SubscriptionUtilized then
+                            let world = World.unsubscribe subscriptionImNui.SubscriptionId world
+                            World.setSubscriptionImNuis (OMap.remove subscriptionKey world.SubscriptionImNuis) world
+                        else
+                            if world.Imperative then subscriptionImNui.SubscriptionUtilized <- false; world
+                            else World.setSubscriptionImNuis (OMap.add subscriptionKey { subscriptionImNui with SubscriptionUtilized = false } world.SubscriptionImNuis) world)
+                        world world.SubscriptionImNuis
+                world
             else world
 
         static member private preUpdateSimulants (world : World) =
@@ -1640,6 +1683,8 @@ module WorldModule2 =
 
         static member private processInput world =
             if SDL.SDL_WasInit SDL.SDL_INIT_TIMER <> 0u then
+                MouseState.update ()
+                KeyboardState.update ()
                 let mutable result = (World.getLiveness world, world)
                 let mutable polledEvent = SDL.SDL_Event ()
                 while
@@ -2325,6 +2370,8 @@ module EntityPropertyDescriptor =
             propertyName = Constants.Engine.PropagatedDescriptorOptPropertyName ||
             propertyName = "Rotation" ||
             propertyName = "RotationLocal" ||
+            propertyName = "Angles" ||
+            propertyName = "AnglesLocal" ||
             propertyName = "Light" ||
             propertyName = "LightProbe" then
             false
@@ -2884,10 +2931,12 @@ module ScreenDispatcherModule =
     type World with
 
         /// Begin the ImNui declaration of a screen with the given arguments using a child group read from the given file path.
+        /// Note that changing the file path over time has no effect as only the first moment is used.
         static member beginScreenWithGroupFromFilePlus<'d, 'r when 'd :> ScreenDispatcher> (zero : 'r) init name select behavior groupFilePath world args =
             World.beginScreenPlus10<'d, 'r> zero init World.transitionScreen World.setScreenSlide name select behavior (Some groupFilePath) world args
 
         /// Begin the ImNui declaration of a screen with the given arguments using a child group read from the given file path.
+        /// Note that changing the file path over time has no effect as only the first moment is used.
         static member beginScreenWithGroupFromFile<'d when 'd :> ScreenDispatcher> name select behavior groupFilePath world args =
             World.beginScreen8<'d> World.transitionScreen World.setScreenSlide name select behavior (Some groupFilePath) world args
 

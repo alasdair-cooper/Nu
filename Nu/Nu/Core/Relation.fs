@@ -146,7 +146,9 @@ module Relation =
             let names3 = Array.trySkip namesMatching names2
             match names3 with
             | [||] ->
-                { Links = [|Current|] }
+                if names.Length > names2.Length
+                then { Links = Array.cons Parent (Array.skip names2.Length names |> Array.map Name) }
+                else { Links = [|Current|] }
             | _ ->
                 let parents = Array.init (names.Length - namesMatching) (fun _ -> Parent)
                 let links = Array.map Name names3
@@ -177,11 +179,15 @@ module Relation =
     [<RequireQualifiedAccess>]
     module Relation =
 
-        /// Make a relation from a list of option names.
+        /// Make a relation from a sequence of links.
+        let makeFromSeq<'a> links : 'a Relation =
+            { Links = links }
+
+        /// Make a relation from an array of links.
         let makeFromArray<'a> links : 'a Relation =
             { Links = links }
 
-        /// Make a relation from a list of option names.
+        /// Make a relation from a list of links.
         let makeFromList<'a> links : 'a Relation =
             { Links = List.toArray links }
 
